@@ -3,9 +3,6 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# DS_STORE
-*.DS_Store*
-
 # C extensions
 *.so
 
@@ -104,4 +101,11 @@ ENV/
 .mypy_cache/
 
 #DS_Stores
-*.DS_Store
+*.DS_Store*
+
+# Jetbrains
+.idea/
+*.orig
+
+# Notebooks
+notebooks/
