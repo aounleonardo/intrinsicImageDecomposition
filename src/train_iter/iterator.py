@@ -11,6 +11,7 @@ import threading
 import multiprocessing
 import time
 
+
 try:
     import queue
 except ImportError:
@@ -18,23 +19,17 @@ except ImportError:
 
 # Misc. 3rd party libs
 import numpy as np
-
-# Project files.
-from data_manipulation.image_manipulation import loadImagesTiff
-from data_manipulation.dataset_manipulation import loadYfromFiles
-
+from scipy import misc
 
 class IteratorDirsXY(object):
     """ This class implements the data iterator for the case where we have
-    data X (images) and labels Y (mesh vertices) which constitute pairs.
+    data I (images), S (shadings) and A (albedos).
     """
     def __init__(self,
-                 dirX, subdirsX,
-                 dirY, subdirsY,
-                 imgShape=(224, 224), gtShape=(363, ),
+                 dirI,dirS,dirA, subdirs,
+                 imgShape=(224, 224),
                  dimOrdering='tensorflow',
-                 batchSize=64, shuffle=False, seed=None,
-                 yDataField='y'):
+                 batchSize=64, shuffle=False, seed=None):
         """ Constructor.
 
         Parameters
@@ -49,15 +44,14 @@ class IteratorDirsXY(object):
         seed
         follow_links
         """
-        self._dirX = dirX
-        self._subdirsX = subdirsX
-        self._dirY = dirY
-        self._subdirsY = subdirsY
+        self._dirI = dirI
+        self._dirS = dirS
+        self._dirA = dirA
+        self._subdirs = subdirs
         self._imgShape = tuple(imgShape)
         self._batchSize = batchSize
         self._shuffle = shuffle
         self._seed = seed
-        self._yDataField = yDataField
         self._batchIndex = 0
         self._totalBatchesSeen = 0
         self._lock = threading.Lock()
@@ -67,44 +61,51 @@ class IteratorDirsXY(object):
             self._imgShape = self._imgShape + (3,)
         else:
             self._imgShape = (3,) + self._imgShape
-        self._gtShape = gtShape
 
-        whiteListFormatsX = {'png', 'jpg', 'jpeg', 'bmp', 'tiff', 'tif'}
-        whiteListFormatsY = {'png', 'jpg', 'jpeg', 'bmp', 'tiff', 'tif'}
+        whiteListFormats = {'png', 'jpg', 'jpeg', 'bmp', 'tiff', 'tif'}
 
-        self._numSamplesX = 0
-        self._numSamplesY = 0
+        self._numSamplesI = 0
+        self._numSamplesS = 0
+        self._numSamplesA = 0
 
-        self._filesX = []
-        self._filesY = []
+        self._filesI = []
+        self._filesS = []
+        self._filesA = []
 
-        for subdir in self._subdirsX:
-            files = os.listdir(os.path.join(self._dirX, subdir))
+        for subdir in self._subdirs:
+            files = os.listdir(os.path.join(self._dirI, subdir))
             for f in files:
-                for ext in whiteListFormatsX:
-                    if f.lower().endswith('.' + ext):
-                        self._numSamplesX += 1
-                        self._filesX.append(os.path.join(subdir, f))
+                for ext in whiteListFormats:
+                    if f.lower().endswith('.' + ext) and not f.lower().startswith('._sh'):
+                        self._numSamplesI += 1
+                        self._filesI.append(os.path.join(subdir, f))
 
-        for subdir in self._subdirsY:
-            files = os.listdir(os.path.join(self._dirY, subdir))
+            files = os.listdir(os.path.join(self._dirS, subdir))
             for f in files:
-                for ext in whiteListFormatsY:
-                    if f.lower().endswith('.' + ext):
-                        self._numSamplesY += 1
-                        self._filesY.append(os.path.join(subdir, f))
+                for ext in whiteListFormats:
+                    if f.lower().endswith('.' + ext) and not f.lower().startswith('._sh'):
+                        self._numSamplesS += 1
+                        self._filesS.append(os.path.join(subdir, f))
 
-        self._filesX = np.array(self._filesX)
-        self._filesY = np.array(self._filesY)
+            files = os.listdir(os.path.join(self._dirA, subdir))
+            for f in files:
+                for ext in whiteListFormats:
+                    if f.lower().endswith('.' + ext) and not f.lower().startswith('._sh'):
+                        self._numSamplesA += 1
+                        self._filesA.append(os.path.join(subdir, f))
 
-        if self._numSamplesX != self._numSamplesY:
-            raise Exception('Number of samples in X source and Y source '
-                            'datasets does not match, {nx} != {ny}'.format(
-                nx=self._numSamplesX, ny=self._numSamplesY))
+        self._filesI = np.array(self._filesI)
+        self._filesS = np.array(self._filesS)
+        self._filesA = np.array(self._filesA)
 
-        logging.info('Found {n} samples in X, Y datasets.'.format(n=self._numSamplesX))
+        if self._numSamplesI != self._numSamplesS or self._numSamplesI != self._numSamplesA:
+            raise Exception('Number of samples in I, S and A sources '
+                            'datasets does not match, {ni} != {ns} != {na}'.format(
+                ni=self._numSamplesI, ns=self._numSamplesS, na=self._numSamplesA))
 
-        self.indexGenerator = self._flowIndex(self._numSamplesX, self._batchSize,
+        logging.info('Found {n} samples in I, S and A datasets.'.format(n=self._numSamplesI))
+
+        self.indexGenerator = self._flowIndex(self._numSamplesI, self._batchSize,
                                               self._shuffle, self._seed)
 
     def reset(self):
@@ -149,18 +150,28 @@ class IteratorDirsXY(object):
             indexArray, curIdx, curBS = next(self.indexGenerator)
 
         # Loading/normalization/tf of images is not under thread lock so it can be done in parallel.
-        fPathsX = [os.path.join(self._dirX, f) for f in self._filesX[indexArray]]
-        fPathsY = [os.path.join(self._dirY, f) for f in self._filesY[indexArray]]
+        fPathsI = [os.path.join(self._dirI, f) for f in self._filesI[indexArray]]
+        fPathsS = [os.path.join(self._dirS, f) for f in self._filesS[indexArray]]
+        fPathsA = [os.path.join(self._dirA, f) for f in self._filesA[indexArray]]
 
-        batchX = loadImagesTiff(fPathsX, imgDimOrdering=self._dimOrdering, normalize=True)
-        batchY = loadImagesTiff(fPathsY, imgDimOrdering=self._dimOrdering, normalize=True)
-        # batchY = loadYfromFiles(fPathsY, dataField=self._yDataField)
+        batchI = loadImagesTiff(fPathsI, normalize=True)
+        batchS = loadImagesTiff(fPathsS, normalize=True)
+        batchA = loadImagesTiff(fPathsA, normalize=True)
 
-        return batchX, batchY
+        return batchI, batchS, batchA
 
     def getNumSamples(self):
-        return self._numSamplesX
+        return self._numSamplesI
 
+
+def loadImagesTiff(paths, normalize=True):
+    nb_imgs = len(paths)
+    imgs = np.empty([nb_imgs, 224, 224, 3])
+
+    for index in range(nb_imgs):
+        imgs[index] = misc.imread(paths[index], mode='RGB') / 255.0
+
+    return imgs
 
 def generatorQueue(generator, maxQueSize=10, waitTime=0.05, numWorker=1, pickleSafe=False):
     """Builds a queue out of a data generator.
